@@ -646,8 +646,10 @@ class SessionManager {
     try {
       // Try JWT claims first
       if (session.access_token && session.access_token.includes('.') && session.access_token.split('.').length === 3) {
-        const payload = JSON.parse(atob(session.access_token.split('.')[1]));
-        tenant_id = payload.tenant_id || '';
+        const rawPayload = session.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+        const paddedPayload = rawPayload + '='.repeat((4 - (rawPayload.length % 4)) % 4);
+        const payload = JSON.parse(atob(paddedPayload));
+        tenant_id = payload.tenant_id || payload.app_metadata?.tenant_id || payload.user_metadata?.tenant_id || '';
       } else if (session.access_token === "mock-token-123") {
         // Handle static local token.
         tenant_id = "tenant-a";

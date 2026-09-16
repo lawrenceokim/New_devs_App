@@ -16,6 +16,7 @@ interface AuthSession {
   user: AuthUser;
   token_type: string;
   expires_in?: number;
+  expires_at?: number;
 }
 
 interface AuthResponse {
@@ -40,6 +41,59 @@ class LocalAuthClient {
 
   private getApiUrl(): string {
     return import.meta.env.VITE_API_URL || import.meta.env.VITE_BACKEND_URL || 'http://localhost:8000';
+  }
+
+  private decodeTokenPayload(token: string): any | null {
+    try {
+      const parts = token.split('.');
+      if (parts.length !== 3) return null;
+
+      const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const paddedPayload = payload + '='.repeat((4 - (payload.length % 4)) % 4);
+      return JSON.parse(atob(paddedPayload));
+    } catch (error) {
+      console.warn('[LocalAuth] Failed to decode JWT payload:', error);
+      return null;
+    }
+  }
+
+  private normalizeSession(session: Partial<AuthSession> & { access_token: string }): AuthSession {
+    const payload = this.decodeTokenPayload(session.access_token);
+    const baseUser = session.user
+      || this.session?.user
+      || {
+        id: payload?.id || payload?.sub || '',
+        email: payload?.email || '',
+      };
+
+    const tenantId = baseUser.tenant_id
+      || payload?.tenant_id
+      || payload?.app_metadata?.tenant_id
+      || payload?.user_metadata?.tenant_id;
+
+    const user: AuthUser = {
+      ...baseUser,
+      app_metadata: baseUser.app_metadata || payload?.app_metadata || {},
+      user_metadata: baseUser.user_metadata || payload?.user_metadata || {},
+      tenant_id: tenantId || baseUser.tenant_id,
+    };
+
+    const expiresAt = session.expires_at || payload?.exp;
+    const expiresIn = expiresAt ? Math.max(0, expiresAt - Math.floor(Date.now() / 1000)) : session.expires_in;
+
+    return {
+      ...session,
+      access_token: session.access_token,
+      token_type: session.token_type || 'bearer',
+      user,
+      expires_at: expiresAt,
+      expires_in: expiresIn,
+    };
+  }
+
+  private isSessionExpired(session: AuthSession): boolean {
+    if (!session.expires_at) return false;
+    return session.expires_at * 1000 <= Date.now();
   }
 
   private notifySubscribers(event: string, session: AuthSession | null) {
@@ -68,7 +122,15 @@ class LocalAuthClient {
     try {
       const stored = localStorage.getItem(this.storageKey);
       if (stored) {
-        this.session = JSON.parse(stored);
+        const parsed = this.normalizeSession(JSON.parse(stored));
+        if (this.isSessionExpired(parsed)) {
+          localStorage.removeItem(this.storageKey);
+          this.session = null;
+          return;
+        }
+
+        this.session = parsed;
+        localStorage.setItem(this.storageKey, JSON.stringify(parsed));
       }
     } catch (error) {
       console.warn('[LocalAuth] Failed to load session from storage:', error);
@@ -96,11 +158,11 @@ class LocalAuthClient {
         throw new Error(data.error);
       }
 
-      const session: AuthSession = {
+      const session = this.normalizeSession({
         access_token: data.access_token,
         token_type: data.token_type || 'bearer',
         user: data.user,
-      };
+      });
 
       this.saveSession(session);
 
@@ -144,9 +206,15 @@ class LocalAuthClient {
     }
   }
 
-  async getSession(): Promise<{ data: { session: AuthSession | null } }> {
+  async getSession(): Promise<{ data: { session: AuthSession | null }, error: Error | null }> {
     // Check if current session is still valid
     if (this.session?.access_token) {
+      if (this.isSessionExpired(this.session)) {
+        const error = new Error('Session expired');
+        this.saveSession(null);
+        return { data: { session: null }, error };
+      }
+
       try {
         // Verify token is still valid by calling a protected endpoint
         const response = await fetch(`${this.getApiUrl()}/api/v1/auth/me`, {
@@ -156,25 +224,41 @@ class LocalAuthClient {
         });
 
         if (response.ok) {
-          return { data: { session: this.session } };
-        } else {
-          // Session invalid, clear it
-          this.saveSession(null);
+          const userData = await response.json();
+          this.session = this.normalizeSession({
+            ...this.session,
+            user: {
+              ...this.session.user,
+              ...userData,
+            },
+          });
+          localStorage.setItem(this.storageKey, JSON.stringify(this.session));
+          return { data: { session: this.session }, error: null };
         }
+
+        if (response.status === 401) {
+          // Confirmed invalid token, clear it
+          const error = new Error('Session invalid');
+          this.saveSession(null);
+          return { data: { session: null }, error };
+        }
+
+        console.warn('[LocalAuth] Session validation returned non-auth error, preserving session:', response.status);
+        return { data: { session: this.session }, error: null };
       } catch (error) {
         console.warn('[LocalAuth] Session validation failed:', error);
-        this.saveSession(null);
+        return { data: { session: this.session }, error: null };
       }
     }
 
-    return { data: { session: null } };
+    return { data: { session: null }, error: null };
   }
 
-  async getUser(token?: string): Promise<{ user: AuthUser | null }> {
+  async getUser(token?: string): Promise<{ data: { user: AuthUser | null }, error: Error | null, user: AuthUser | null }> {
     const tokenToUse = token || this.session?.access_token;
 
     if (!tokenToUse) {
-      return { user: null };
+      return { data: { user: null }, error: null, user: null };
     }
 
     try {
@@ -186,19 +270,57 @@ class LocalAuthClient {
 
       if (response.ok) {
         const userData = await response.json();
-        return { user: userData };
-      } else {
-        return { user: null };
+        const user = {
+          ...(this.session?.user || {}),
+          ...userData,
+        } as AuthUser;
+
+        if (this.session && tokenToUse === this.session.access_token) {
+          this.session = this.normalizeSession({
+            ...this.session,
+            user,
+          });
+          localStorage.setItem(this.storageKey, JSON.stringify(this.session));
+        }
+
+        return { data: { user }, error: null, user };
       }
+
+      if (response.status === 401) {
+        const error = new Error('Invalid authentication token');
+        if (this.session && tokenToUse === this.session.access_token) {
+          this.saveSession(null);
+        }
+        return { data: { user: null }, error, user: null };
+      }
+
+      console.warn('[LocalAuth] User validation returned non-auth error, preserving session:', response.status);
+      const fallbackUser = this.session?.user || null;
+      return { data: { user: fallbackUser }, error: null, user: fallbackUser };
     } catch (error) {
       console.error('[LocalAuth] Get user failed:', error);
-      return { user: null };
+      const fallbackUser = this.session?.user || null;
+      return { data: { user: fallbackUser }, error: null, user: fallbackUser };
     }
   }
 
-  async setSession(session: AuthSession): Promise<{ error: Error | null }> {
+  async refreshSession(): Promise<{ data: { session: AuthSession | null }, error: Error | null }> {
+    if (!this.session?.access_token) {
+      return { data: { session: null }, error: new Error('No active session') };
+    }
+
+    if (this.isSessionExpired(this.session)) {
+      const error = new Error('Session expired');
+      this.saveSession(null);
+      return { data: { session: null }, error };
+    }
+
+    return { data: { session: this.session }, error: null };
+  }
+
+  async setSession(session: Partial<AuthSession> & { access_token: string }): Promise<{ error: Error | null }> {
     try {
-      this.saveSession(session);
+      this.saveSession(this.normalizeSession(session));
       return { error: null };
     } catch (error: any) {
       return { error: error };
@@ -237,6 +359,7 @@ class LocalAuthClient {
       signOut: this.signOut.bind(this),
       getSession: this.getSession.bind(this),
       getUser: this.getUser.bind(this),
+      refreshSession: this.refreshSession.bind(this),
       setSession: this.setSession.bind(this),
       onAuthStateChange: this.onAuthStateChange.bind(this),
     };

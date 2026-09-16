@@ -10,31 +10,11 @@
  */
 
 import { supabase } from './supabase';
+import { getApiBase } from './apiBase';
 import { sessionManager } from '../utils/sessionManager';
 import { withRetry, handleApiError, classifyError } from '../utils/apiErrorHandler';
 
-// Get backend URL with fallback for misconfigured production environments
-const getBackendUrl = () => {
-  // For production/staging (non-localhost), use relative URLs to avoid CORS
-  if (typeof window !== 'undefined' &&
-    window.location.hostname !== 'localhost' &&
-    window.location.hostname !== '127.0.0.1') {
-    console.log(`[SecureAPI] Using relative URLs for ${window.location.hostname}`);
-    return ''; // Empty string means relative URLs - the browser will use the same domain
-  }
-
-  // For local development, check for configured URL
-  const configuredUrl = import.meta.env.VITE_BACKEND_URL;
-  if (configuredUrl && !configuredUrl.includes('localhost')) {
-    // If it's not localhost but we're in development, it might be a remote backend
-    return configuredUrl;
-  }
-
-  // Default to localhost for development
-  return configuredUrl || 'http://localhost:8000';
-};
-
-const BACKEND_URL = getBackendUrl();
+const BACKEND_URL = getApiBase();
 
 export class TenantIsolationError extends Error {
   constructor(message: string) {
@@ -59,6 +39,20 @@ export class SecureAPIClient {
   private constructor() {
     this.backendUrl = BACKEND_URL;
     this.interceptDirectQueries();
+  }
+
+  private decodeJwtPayload(token: string): any | null {
+    try {
+      const parts = token.split('.');
+      if (parts.length !== 3) return null;
+
+      const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const paddedPayload = payload + '='.repeat((4 - (payload.length % 4)) % 4);
+      return JSON.parse(atob(paddedPayload));
+    } catch (error) {
+      console.error('[SecureAPI] Failed to decode JWT payload:', error);
+      return null;
+    }
   }
 
   static getInstance(): SecureAPIClient {
@@ -175,7 +169,13 @@ export class SecureAPIClient {
 
     try {
       // Extract tenant ID from JWT token if available
-      const token = this.cachedToken;
+      let token = this.cachedToken;
+      if (!token) {
+        const { data: { session } } = await supabase.auth.getSession();
+        token = session?.access_token || null;
+        this.cachedToken = token;
+      }
+
       if (token) {
         let extractedTenantId = null;
 
@@ -185,12 +185,12 @@ export class SecureAPIClient {
         }
         // Check if it's a valid JWT
         else if (token.includes('.') && token.split('.').length === 3) {
-          const payload = JSON.parse(atob(token.split('.')[1]));
-          extractedTenantId = payload.user_metadata?.tenant_id || payload.tenant_id;
+          const payload = this.decodeJwtPayload(token);
+          extractedTenantId = payload?.tenant_id || payload?.app_metadata?.tenant_id || payload?.user_metadata?.tenant_id;
         }
 
         if (extractedTenantId) {
-          // Validate tenant ID format (should be UUID)
+          // Validate tenant ID format
           if (this.isValidTenantId(extractedTenantId)) {
             this.cachedTenantId = extractedTenantId;
             return this.cachedTenantId;
@@ -222,9 +222,11 @@ export class SecureAPIClient {
     try {
       const token = this.cachedToken;
       if (token) {
-        const payload = JSON.parse(atob(token.split('.')[1]));
+        const payload = this.decodeJwtPayload(token);
+        if (!payload) return null;
+
         // Use user sub (unique ID) + email as session key for isolation
-        const userSub = payload.sub;
+        const userSub = payload.sub || payload.id;
         const userEmail = payload.email;
 
         if (userSub && userEmail) {
@@ -243,9 +245,12 @@ export class SecureAPIClient {
    * Validate tenant ID format for security
    */
   private isValidTenantId(tenantId: string): boolean {
-    // Check for UUID format (basic validation)
+    // Check for UUID format or challenge tenant IDs like tenant-a / tenant-b.
     const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    return typeof tenantId === 'string' && tenantId.length > 0 && uuidRegex.test(tenantId);
+    const challengeTenantRegex = /^tenant-[a-z0-9-]+$/i;
+    return typeof tenantId === 'string'
+      && tenantId.length > 0
+      && (uuidRegex.test(tenantId) || challengeTenantRegex.test(tenantId));
   }
 
   /**

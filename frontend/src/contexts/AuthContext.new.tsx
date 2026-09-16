@@ -49,20 +49,26 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let tenant_id: string | null = null;
     let source = 'none';
 
-    // 1. First try JWT claims (added by custom_access_token_hook)
+    // 1. Preserve tenant_id returned directly by the local auth API
+    if (enhancedUser.tenant_id) {
+      tenant_id = enhancedUser.tenant_id;
+      source = 'user';
+    }
+
+    // 2. Then try JWT claims (added by custom_access_token_hook)
     const jwtTenantId = extractTenantFromSession(session);
-    if (jwtTenantId) {
+    if (!tenant_id && jwtTenantId) {
       tenant_id = jwtTenantId;
       source = 'jwt_claims';
     }
 
-    // 2. Fallback to app_metadata  
+    // 3. Fallback to app_metadata
     if (!tenant_id && enhancedUser.app_metadata?.tenant_id) {
       tenant_id = enhancedUser.app_metadata.tenant_id;
       source = 'app_metadata';
     }
 
-    // 3. Fallback to user_metadata
+    // 4. Fallback to user_metadata
     if (!tenant_id && enhancedUser.user_metadata?.tenant_id) {
       tenant_id = enhancedUser.user_metadata.tenant_id;
       source = 'user_metadata';
@@ -94,8 +100,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     let tenant_id: string | null = null;
     let source = 'none';
 
-    // Try app_metadata first
-    if (enhancedUser.app_metadata?.tenant_id) {
+    // Preserve direct tenant_id first
+    if (enhancedUser.tenant_id) {
+      tenant_id = enhancedUser.tenant_id;
+      source = 'user';
+    }
+    // Try app_metadata next
+    else if (enhancedUser.app_metadata?.tenant_id) {
       tenant_id = enhancedUser.app_metadata.tenant_id;
       source = 'app_metadata';
     }
