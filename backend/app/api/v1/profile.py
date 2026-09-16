@@ -25,6 +25,27 @@ router = APIRouter(prefix="/profile", tags=["profile"])
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'webp', 'gif'}
 MAX_FILE_SIZE = 5 * 1024 * 1024  # 5MB
 AVATAR_SIZE = (300, 300)  # Max avatar dimensions
+PROFILE_FALLBACK_STORE: Dict[str, Dict[str, Any]] = {}
+
+
+def build_default_profile(user: AuthenticatedUser) -> Dict[str, Any]:
+    now_iso = datetime.utcnow().isoformat()
+    return {
+        'id': f'synthetic-{user.id}',
+        'user_id': user.id,
+        'display_name': (user.email.split('@')[0] if user.email else 'User'),
+        'bio': None,
+        'phone': None,
+        'department': None,
+        'job_title': None,
+        'location': None,
+        'timezone': 'UTC',
+        'language': 'en',
+        'theme': 'light',
+        'avatar_url': None,
+        'created_at': now_iso,
+        'updated_at': now_iso,
+    }
 
 def allowed_file(filename: str) -> bool:
     """Check if the file extension is allowed"""
@@ -69,22 +90,7 @@ async def get_profile(
         # Create default profile data in case tables don't exist or profile is missing
         now_iso = datetime.utcnow().isoformat()
         # Build safe defaults matching the response models when DB rows are missing
-        default_profile = {
-            'id': f'synthetic-{user.id}',
-            'user_id': user.id,
-            'display_name': (user.email.split('@')[0] if user.email else 'User'),
-            'bio': None,
-            'phone': None,
-            'department': None,
-            'job_title': None,
-            'location': None,
-            'timezone': 'UTC',
-            'language': 'en',
-            'theme': 'light',
-            'avatar_url': None,
-            'created_at': now_iso,
-            'updated_at': now_iso,
-        }
+        default_profile = build_default_profile(user)
         
         default_preferences = {
             'id': f'synthetic-{user.id}',
@@ -111,13 +117,18 @@ async def get_profile(
             if profile_response.data:
                 profile_data = profile_response.data[0]
                 profile = UserProfile(**profile_data)
+            elif user.id in PROFILE_FALLBACK_STORE:
+                profile = UserProfile(**PROFILE_FALLBACK_STORE[user.id])
             else:
                 logger.info(f"No profile found for user {user.id}, using default profile")
                 profile = UserProfile(**default_profile)
         except Exception as profile_error:
             logger.warning(f"Error accessing user_profiles table for user {user.id}: {profile_error}")
-            logger.info(f"Using default profile for user {user.id}")
-            profile = UserProfile(**default_profile)
+            if user.id in PROFILE_FALLBACK_STORE:
+                profile = UserProfile(**PROFILE_FALLBACK_STORE[user.id])
+            else:
+                logger.info(f"Using default profile for user {user.id}")
+                profile = UserProfile(**default_profile)
         
         # Try to get user preferences
         try:
@@ -195,13 +206,31 @@ async def update_profile(
         # Update profile
         response = supabase.table('user_profiles').update(update_data).eq('user_id', user.id).execute()
         
-        if not response.data:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Profile not found"
-            )
-        
-        updated_profile = UserProfile(**response.data[0])
+        if response.data:
+            updated_profile = UserProfile(**response.data[0])
+        else:
+            now_iso = datetime.utcnow().isoformat()
+            fallback_profile = PROFILE_FALLBACK_STORE.get(user.id, build_default_profile(user))
+            fallback_profile.update(update_data)
+            fallback_profile['updated_at'] = now_iso
+
+            try:
+                insert_data = {
+                    key: value for key, value in fallback_profile.items()
+                    if key != 'id' or not str(value).startswith('synthetic-')
+                }
+                insert_response = supabase.table('user_profiles').insert(insert_data).execute()
+                if insert_response.data:
+                    updated_profile = UserProfile(**insert_response.data[0])
+                    PROFILE_FALLBACK_STORE[user.id] = updated_profile.dict()
+                else:
+                    PROFILE_FALLBACK_STORE[user.id] = fallback_profile
+                    updated_profile = UserProfile(**fallback_profile)
+            except Exception as insert_error:
+                logger.warning(f"Could not create profile row for user {user.id}, using fallback store: {insert_error}")
+                PROFILE_FALLBACK_STORE[user.id] = fallback_profile
+                updated_profile = UserProfile(**fallback_profile)
+
         logger.info(f"Successfully updated profile for user {user.id}")
         
         return updated_profile
