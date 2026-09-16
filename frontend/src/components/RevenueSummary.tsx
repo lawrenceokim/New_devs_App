@@ -1,125 +1,182 @@
-import React, { useEffect, useState } from 'react';
-import { SecureAPI } from '../lib/secureApi';
+import React, { useEffect, useState } from "react";
+import { SecureAPI } from "../lib/secureApi";
 
 interface RevenueData {
-    property_id: string;
-    total_revenue: string;
-    currency: string;
-    reservations_count: number;
-    year?: number;
-    month?: number;
+  property_id: string;
+  total_revenue: string;
+  currency: string;
+  reservations_count: number;
+  year?: number;
+  month?: number;
+  previous_year?: number;
+  previous_month?: number;
+  previous_month_revenue?: string;
+  revenue_change_percent?: string;
 }
 
 interface RevenueSummaryProps {
-    propertyId?: string;
-    year: number;
-    month: number;
-    debugTenant?: string; 
-    showRaw?: boolean;
+  propertyId?: string;
+  year: number;
+  month: number;
+  debugTenant?: string;
+  showRaw?: boolean;
 }
 
 const formatMoney = (value: string): string => {
-    const [wholePart, decimalPart = '00'] = value.split('.');
-    const isNegative = wholePart.startsWith('-');
-    const whole = isNegative ? wholePart.slice(1) : wholePart;
-    const groupedWhole = Number(whole || '0').toLocaleString();
-    return `${isNegative ? '-' : ''}${groupedWhole}.${decimalPart.padEnd(2, '0').slice(0, 2)}`;
+  const [wholePart, decimalPart = "00"] = value.split(".");
+  const isNegative = wholePart.startsWith("-");
+  const whole = isNegative ? wholePart.slice(1) : wholePart;
+  const groupedWhole = Number(whole || "0").toLocaleString();
+  return `${isNegative ? "-" : ""}${groupedWhole}.${decimalPart.padEnd(2, "0").slice(0, 2)}`;
 };
 
-export const RevenueSummary: React.FC<RevenueSummaryProps> = ({ propertyId = 'prop-001', year, month, debugTenant, showRaw }) => {
-    const [data, setData] = useState<RevenueData | null>(null);
-    const [loading, setLoading] = useState(true);
-    const [error, setError] = useState('');
+const formatPercentage = (value: string): string => {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) return "0";
 
-    const activeTenant = debugTenant || 'candidate';
+  return numericValue.toLocaleString(undefined, {
+    minimumFractionDigits: Number.isInteger(numericValue) ? 0 : 2,
+    maximumFractionDigits: 2,
+  });
+};
 
-    useEffect(() => {
-        const fetchRevenue = async () => {
-            setLoading(true);
-            try {
-                // Use SecureAPI to handle authentication automatically
-                // We pass the simulatedTenant option which SecureAPI will attach as a header
-                const response = await SecureAPI.getDashboardSummary(propertyId, {
-                    simulatedTenant: activeTenant,
-                    year,
-                    month,
-                    timestamp: Date.now()
-                });
-                setData(response);
-            } catch (err) {
-                setError('Failed to load revenue data');
-                console.error(err);
-            } finally {
-                setLoading(false);
-            }
-        };
+export const RevenueSummary: React.FC<RevenueSummaryProps> = ({
+  propertyId = "prop-001",
+  year,
+  month,
+  debugTenant,
+  showRaw,
+}) => {
+  const [data, setData] = useState<RevenueData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-        fetchRevenue();
-    }, [propertyId, activeTenant, year, month]);
+  const activeTenant = debugTenant || "candidate";
 
-    if (loading) {
-        return (
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
-                <div className="animate-pulse space-y-4">
-                    <div className="h-4 bg-gray-100 rounded w-1/4"></div>
-                    <div className="h-8 bg-gray-100 rounded w-1/2"></div>
-                    <div className="flex gap-4 pt-4">
-                        <div className="h-12 bg-gray-100 rounded flex-1"></div>
-                        <div className="h-12 bg-gray-100 rounded flex-1"></div>
-                    </div>
-                </div>
-            </div>
-        );
-    }
+  useEffect(() => {
+    const fetchRevenue = async () => {
+      setLoading(true);
+      try {
+        // Use SecureAPI to handle authentication automatically
+        // We pass the simulatedTenant option which SecureAPI will attach as a header
+        const response = await SecureAPI.getDashboardSummary(propertyId, {
+          simulatedTenant: activeTenant,
+          year,
+          month,
+          timestamp: Date.now(),
+        });
+        setData(response);
+      } catch (err) {
+        setError("Failed to load revenue data");
+        console.error(err);
+      } finally {
+        setLoading(false);
+      }
+    };
 
-    if (error) return <div className="p-4 text-red-500 bg-red-50 rounded-lg">{error}</div>;
-    if (!data) return null;
+    fetchRevenue();
+  }, [propertyId, activeTenant, year, month]);
 
-    const displayTotal = formatMoney(data.total_revenue);
-
+  if (loading) {
     return (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow duration-300">
-            {showRaw && (
-                <div className="p-3 bg-gray-50 text-xs font-mono border-b border-gray-100 overflow-auto max-h-32">
-                    <strong className="block mb-1 text-gray-500 uppercase tracking-wider text-[10px]">Raw API Response</strong>
-                    <pre className="text-gray-700">{JSON.stringify(data, null, 2)}</pre>
-                </div>
-            )}
-
-            <div className="p-6">
-                <div className="flex items-center justify-between mb-6">
-                    <div>
-                        <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide">Total Revenue</h2>
-                        <div className="flex items-baseline gap-2 mt-1">
-                            <span className="text-3xl font-bold text-gray-900 tracking-tight">
-                                {data.currency} {displayTotal}
-                            </span>
-                            {/* Fake trend indicator for premium feel */}
-                            <span className="inline-flex items-baseline px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 md:mt-2 lg:mt-0">
-                                <svg className="-ml-1 mr-0.5 h-3 w-3 flex-shrink-0 self-center text-green-500" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
-                                    <path fillRule="evenodd" d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
-                                </svg>
-                                12%
-                            </span>
-                        </div>
-                    </div>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4 pt-4 border-t border-gray-100">
-                    <div>
-                        <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Property ID</p>
-                        <p className="text-sm font-semibold text-gray-700 font-mono mt-1">{data.property_id}</p>
-                    </div>
-                    <div>
-                        <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">Reservations</p>
-                        <p className="text-sm font-semibold text-gray-700 mt-1">{data.reservations_count} <span className="font-normal text-gray-400">bookings</span></p>
-                    </div>
-                </div>
-
-                {/* Precision Warning Area */}
-                <div className="mt-4 h-6">
-                </div>
-            </div>
+      <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-200">
+        <div className="animate-pulse space-y-4">
+          <div className="h-4 bg-gray-100 rounded w-1/4"></div>
+          <div className="h-8 bg-gray-100 rounded w-1/2"></div>
+          <div className="flex gap-4 pt-4">
+            <div className="h-12 bg-gray-100 rounded flex-1"></div>
+            <div className="h-12 bg-gray-100 rounded flex-1"></div>
+          </div>
         </div>
+      </div>
     );
+  }
+
+  if (error)
+    return <div className="p-4 text-red-500 bg-red-50 rounded-lg">{error}</div>;
+  if (!data) return null;
+
+  const displayTotal = formatMoney(data.total_revenue);
+  const revenueChange = Number(data.revenue_change_percent || "0");
+  const trendLabel = `${revenueChange > 0 ? "+" : ""}${formatPercentage(data.revenue_change_percent || "0.00")}%`;
+  const trendTone =
+    revenueChange < 0
+      ? "bg-red-100 text-red-800"
+      : revenueChange > 0
+        ? "bg-green-100 text-green-800"
+        : "bg-gray-100 text-gray-700";
+  const trendIconTone =
+    revenueChange < 0
+      ? "text-red-500 rotate-180"
+      : revenueChange > 0
+        ? "text-green-500"
+        : "text-gray-500";
+
+  return (
+    <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden hover:shadow-md transition-shadow duration-300">
+      {showRaw && (
+        <div className="p-3 bg-gray-50 text-xs font-mono border-b border-gray-100 overflow-auto max-h-32">
+          <strong className="block mb-1 text-gray-500 uppercase tracking-wider text-[10px]">
+            Raw API Response
+          </strong>
+          <pre className="text-gray-700">{JSON.stringify(data, null, 2)}</pre>
+        </div>
+      )}
+
+      <div className="p-6">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h2 className="text-sm font-medium text-gray-500 uppercase tracking-wide">
+              Total Revenue
+            </h2>
+            <div className="flex items-baseline gap-2 mt-1">
+              <span className="text-3xl font-bold text-gray-900 tracking-tight">
+                {data.currency} {displayTotal}
+              </span>
+              <span
+                className={`inline-flex items-baseline px-2.5 py-0.5 rounded-full text-xs font-medium md:mt-2 lg:mt-0 ${trendTone}`}
+              >
+                <svg
+                  className={`-ml-1 mr-0.5 h-3 w-3 flex-shrink-0 self-center ${trendIconTone}`}
+                  fill="currentColor"
+                  viewBox="0 0 20 20"
+                  aria-hidden="true"
+                >
+                  <path
+                    fillRule="evenodd"
+                    d="M5.293 9.707a1 1 0 010-1.414l4-4a1 1 0 011.414 0l4 4a1 1 0 01-1.414 1.414L11 7.414V15a1 1 0 11-2 0V7.414L6.707 9.707a1 1 0 01-1.414 0z"
+                    clipRule="evenodd"
+                  />
+                </svg>
+                {trendLabel}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4 pt-4 border-t border-gray-100">
+          <div>
+            <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">
+              Property ID
+            </p>
+            <p className="text-sm font-semibold text-gray-700 font-mono mt-1">
+              {data.property_id}
+            </p>
+          </div>
+          <div>
+            <p className="text-xs text-gray-500 font-medium uppercase tracking-wider">
+              Reservations
+            </p>
+            <p className="text-sm font-semibold text-gray-700 mt-1">
+              {data.reservations_count}{" "}
+              <span className="font-normal text-gray-400">bookings</span>
+            </p>
+          </div>
+        </div>
+
+        {/* Precision Warning Area */}
+        <div className="mt-4 h-6"></div>
+      </div>
+    </div>
+  );
 };
